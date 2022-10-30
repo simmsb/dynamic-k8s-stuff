@@ -59,6 +59,7 @@ impl Context {
             "kind": "Namespace",
             "metadata": { "name": ns },
         }))?;
+        info!(ns, "Creating namespace");
         let ns = ns_api.create(&PostParams::default(), &ns_dat).await?;
 
         Ok(Self {
@@ -99,7 +100,12 @@ impl Drop for Context {
     }
 }
 
-async fn create_and_wait(ctx: &Context, pods: &[Pod], services: &[Service], timeout: Duration) -> Result<(Vec<Pod>, Vec<Service>)> {
+async fn create_and_wait(
+    ctx: &Context,
+    pods: &[Pod],
+    services: &[Service],
+    timeout: Duration,
+) -> Result<(Vec<Pod>, Vec<Service>)> {
     let pods = try_join_all(pods.iter().map(|p| async {
         let name = p.name_unchecked();
         let pod = ctx
@@ -123,12 +129,15 @@ async fn create_and_wait(ctx: &Context, pods: &[Pod], services: &[Service], time
 
     let services = try_join_all(services.iter().map(|s| async {
         let name = s.name_unchecked();
-        let service = ctx.svc_api.create(&PostParams::default(), s)
+        let service = ctx
+            .svc_api
+            .create(&PostParams::default(), s)
             .instrument(info_span!("Creating service", name))
             .await?;
 
         Ok::<_, color_eyre::eyre::Error>(service)
-    })).await?;
+    }))
+    .await?;
 
     Ok((pods, services))
 }
@@ -146,7 +155,7 @@ fn nginx_pod(name: &str, uuid: &str) -> Result<Pod> {
         "spec": {
             "containers": [{
                 "name": "nginx",
-                "image": "nginx",
+                "image": "lscr.io/linuxserver/nginx:latest",
             }],
         }
     }))?;
@@ -169,6 +178,15 @@ fn socat_pod(name: &str, uuid: &str, upstream_name: &str) -> Result<Pod> {
                 "name": "socat",
                 "image": "alpine/socat",
                 "args": ["tcp-listen:80,fork,reuseaddr", format!("tcp-connect:{}:80", upstream_name)]
+            }, {
+                "name": "net",
+                "image": "nicolaka/netshoot",
+                "args": ["tail", "-f", "/dev/null"],
+                "securityContext": {
+                    "capabilities": {
+                        "add": ["NET_ADMIN"]
+                    }
+                }
             }],
         }
     }))?;
@@ -210,14 +228,9 @@ async fn inner(ctx: &Context) -> Result<()> {
     let nginx_svc = mk_service("nginx-svc", &nginx_uuid)?;
     let socat = socat_pod("socat", &socat_uuid, "nginx-svc")?;
 
-    let pods = create_and_wait(
-        ctx,
-        &[nginx, socat],
-        &[nginx_svc],
-        Duration::from_secs(30),
-    )
-    .instrument(info_span!("Creating pods"))
-    .await?;
+    let pods = create_and_wait(ctx, &[nginx, socat], &[nginx_svc], Duration::from_secs(120))
+        .instrument(info_span!("Creating pods"))
+        .await?;
 
     info!("Created pods: {:#?}", pods);
 
